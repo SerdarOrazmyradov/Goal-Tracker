@@ -1,0 +1,301 @@
+<!DOCTYPE html>
+<html lang="en" data-theme="light">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Goal Tracker — Set, Track, Achieve</title>
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>🎯</text></svg>" />
+<link href="https://cdn.jsdelivr.net/npm/daisyui@5" rel="stylesheet" type="text/css" />
+<script src="https://cdn.jsdelivr.net/npm/@tailwindcss/browser@4"></script>
+<script src="https://unpkg.com/lucide@latest"></script>
+<script>
+  // Avoid theme flash before paint
+  document.documentElement.setAttribute('data-theme',
+    localStorage.getItem('gt-theme') ||
+    (matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light'));
+</script>
+</head>
+
+<body class="min-h-screen bg-base-200">
+<div class="mx-auto max-w-2xl p-4 sm:p-6">
+
+  <!-- Header -->
+  <header class="mb-6 flex items-center justify-between gap-3">
+    <div class="flex items-center gap-3">
+      <div class="rounded-xl bg-primary p-2.5 text-primary-content shadow-sm">
+        <i data-lucide="target" class="h-5 w-5"></i>
+      </div>
+      <div>
+        <h1 class="text-xl font-bold leading-tight sm:text-2xl">Goal Tracker</h1>
+        <p class="text-xs opacity-60">Set it. Track it. Achieve it.</p>
+      </div>
+    </div>
+    <button id="themeBtn" class="btn btn-circle btn-ghost" title="Toggle theme"></button>
+  </header>
+
+  <!-- Summary -->
+  <div class="mb-4 grid grid-cols-3 gap-2 text-center">
+    <div class="card bg-base-100 shadow-sm">
+      <div class="card-body items-center gap-0 p-3">
+        <i data-lucide="rocket" class="mb-1 h-4 w-4 opacity-50"></i>
+        <div id="statActive" class="text-2xl font-bold">0</div>
+        <div class="text-xs opacity-60">Active</div>
+      </div>
+    </div>
+    <div class="card bg-base-100 shadow-sm">
+      <div class="card-body items-center gap-0 p-3">
+        <i data-lucide="check-check" class="mb-1 h-4 w-4 opacity-50"></i>
+        <div id="statDone" class="text-2xl font-bold text-success">0</div>
+        <div class="text-xs opacity-60">Completed</div>
+      </div>
+    </div>
+    <div class="card bg-base-100 shadow-sm">
+      <div class="card-body items-center gap-0 p-3">
+        <i data-lucide="gauge" class="mb-1 h-4 w-4 opacity-50"></i>
+        <div id="statAvg" class="text-2xl font-bold text-primary">0%</div>
+        <div class="text-xs opacity-60">Avg progress</div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Add goal -->
+  <form id="form" class="card mb-6 bg-base-100 shadow-sm">
+    <div class="card-body gap-2 p-4">
+      <input id="title" class="input w-full" placeholder="Goal (e.g. Finish calculus course)" maxlength="60" required />
+      <div class="grid grid-cols-2 gap-2">
+        <input id="target" class="input" placeholder="Target (e.g. 12 chapters)" maxlength="40" required />
+        <input id="deadline" type="date" class="input" required />
+      </div>
+      <button class="btn btn-primary mt-1 gap-1" type="submit">
+        <i data-lucide="plus" class="h-4 w-4"></i> Add Goal
+      </button>
+    </div>
+  </form>
+
+  <!-- Lists -->
+  <div id="lists">
+    <section class="mb-6">
+      <h2 class="mb-2 flex items-center gap-2 text-xs font-semibold uppercase tracking-wide opacity-70">
+        <i data-lucide="rocket" class="h-4 w-4"></i> Active goals
+      </h2>
+      <ul id="activeList" class="space-y-2"></ul>
+    </section>
+
+    <section>
+      <h2 class="mb-2 flex items-center gap-2 text-xs font-semibold uppercase tracking-wide opacity-70">
+        <i data-lucide="check-check" class="h-4 w-4"></i> Completed
+      </h2>
+      <ul id="doneList" class="space-y-2"></ul>
+    </section>
+  </div>
+
+</div>
+
+<script>
+/* ---------------- Helpers ---------------- */
+const $ = s => document.querySelector(s);
+const pad = n => String(n).padStart(2, '0');
+const todayStr = () => { const d = new Date(); return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`; };
+const fmtDate = iso => new Date(iso + 'T00:00:00').toLocaleDateString(undefined, { month: 'short', day: 'numeric' });
+const esc = s => s.replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+const clamp = v => Math.max(0, Math.min(100, v || 0));
+const daysLeft = iso => Math.round((new Date(iso + 'T00:00:00') - new Date(todayStr() + 'T00:00:00')) / 864e5);
+
+/* ---------------- IndexedDB ---------------- */
+let dbp;
+function db() {
+  if (!dbp) dbp = new Promise((res, rej) => {
+    const r = indexedDB.open('goal-tracker', 1);
+    r.onupgradeneeded = () => r.result.createObjectStore('goals', { keyPath: 'id', autoIncrement: true });
+    r.onsuccess = () => res(r.result);
+    r.onerror = () => rej(r.error);
+  });
+  return dbp;
+}
+async function tx(mode, fn) {
+  const d = await db();
+  return new Promise((res, rej) => {
+    const t = d.transaction('goals', mode);
+    const req = fn(t.objectStore('goals'));
+    t.oncomplete = () => res(req && req.result);
+    t.onerror = () => rej(t.error);
+  });
+}
+const getAll = () => tx('readonly', s => s.getAll());
+const addGoal = g => tx('readwrite', s => s.add(g));
+const putGoal = g => tx('readwrite', s => s.put(g));
+const delGoal = id => tx('readwrite', s => s.delete(id));
+
+/* ---------------- State ---------------- */
+let goals = [];
+
+/* ---------------- Templates ---------------- */
+function deadlineBadge(iso) {
+  const d = daysLeft(iso);
+  if (d < 0) return `<span class="badge badge-error badge-sm">${-d}d overdue</span>`;
+  if (d === 0) return `<span class="badge badge-warning badge-sm">Due today</span>`;
+  if (d <= 3) return `<span class="badge badge-warning badge-sm">${d}d left</span>`;
+  return `<span class="badge badge-ghost badge-sm">${d}d left</span>`;
+}
+
+function activeHTML(g) {
+  return `
+  <li class="card bg-base-100 shadow-sm">
+    <div class="card-body gap-2 p-4">
+      <div class="min-w-0">
+        <p class="truncate font-medium">${esc(g.title)}</p>
+        <p class="mt-1 flex flex-wrap items-center gap-x-1.5 gap-y-1 text-xs opacity-60">
+          <span class="truncate">${esc(g.target)}</span>
+          <span>·</span>
+          <span>${fmtDate(g.deadline)}</span>
+          ${deadlineBadge(g.deadline)}
+        </p>
+      </div>
+      <progress class="progress progress-primary w-full" value="${g.progress}" max="100"></progress>
+      <div class="flex items-center gap-1.5">
+        <input type="number" min="0" max="100" step="5" value="${g.progress}"
+               data-progress="${g.id}" class="input input-xs w-16" aria-label="Progress percent" />
+        <span class="text-xs font-semibold opacity-60">%</span>
+        <div class="flex-1"></div>
+        <button class="btn btn-xs btn-outline btn-success gap-1" data-done="${g.id}">
+          <i data-lucide="check" class="h-3 w-3"></i>Done
+        </button>
+        <button class="btn btn-circle btn-ghost btn-xs text-error" data-del="${g.id}" aria-label="Delete">
+          <i data-lucide="trash-2" class="h-4 w-4"></i>
+        </button>
+      </div>
+    </div>
+  </li>`;
+}
+
+function doneHTML(g) {
+  return `
+  <li class="card bg-base-100 shadow-sm">
+    <div class="flex items-center gap-3 p-3">
+      <div class="rounded-lg bg-success/10 p-2 text-success">
+        <i data-lucide="check" class="h-4 w-4"></i>
+      </div>
+      <div class="min-w-0 flex-1">
+        <p class="truncate font-medium line-through opacity-60">${esc(g.title)}</p>
+        <p class="truncate text-xs opacity-50">${esc(g.target)} · ${fmtDate(g.deadline)}</p>
+      </div>
+      <button class="btn btn-circle btn-ghost btn-xs" data-restore="${g.id}" aria-label="Restore">
+        <i data-lucide="rotate-ccw" class="h-4 w-4"></i>
+      </button>
+      <button class="btn btn-circle btn-ghost btn-xs text-error" data-del="${g.id}" aria-label="Delete">
+        <i data-lucide="trash-2" class="h-4 w-4"></i>
+      </button>
+    </div>
+  </li>`;
+}
+
+const emptyHTML = msg =>
+  `<li class="rounded-box border border-dashed border-base-300 py-6 text-center text-sm opacity-50">${msg}</li>`;
+
+/* ---------------- Render ---------------- */
+function render() {
+  const active = goals.filter(g => !g.done).sort((a, b) => a.deadline.localeCompare(b.deadline) || a.id - b.id);
+  const done = goals.filter(g => g.done).sort((a, b) => b.id - a.id);
+  const avg = active.length ? Math.round(active.reduce((s, g) => s + g.progress, 0) / active.length) : 0;
+
+  $('#statActive').textContent = active.length;
+  $('#statDone').textContent = done.length;
+  $('#statAvg').textContent = avg + '%';
+
+  $('#activeList').innerHTML = active.length
+    ? active.map(activeHTML).join('')
+    : emptyHTML('No active goals — add one above! 🎯');
+  $('#doneList').innerHTML = done.length
+    ? done.map(doneHTML).join('')
+    : emptyHTML('Nothing completed yet. Keep going!');
+
+  lucide.createIcons();
+}
+
+async function load() {
+  goals = await getAll();
+  render();
+}
+
+/* ---------------- Theme ---------------- */
+function applyTheme(t) {
+  document.documentElement.setAttribute('data-theme', t);
+  localStorage.setItem('gt-theme', t);
+  $('#themeBtn').innerHTML = `<i data-lucide="${t === 'dark' ? 'sun' : 'moon'}" class="h-5 w-5"></i>`;
+  lucide.createIcons();
+}
+
+/* ---------------- Events ---------------- */
+$('#form').addEventListener('submit', async e => {
+  e.preventDefault();
+  const title = $('#title').value.trim();
+  const target = $('#target').value.trim();
+  const deadline = $('#deadline').value;
+  if (!title || !target || !deadline) return;
+
+  await addGoal({ title, target, deadline, progress: 0, done: false });
+  $('#title').value = '';
+  $('#target').value = '';
+  $('#deadline').value = todayStr();
+  $('#title').focus();
+  await load();
+});
+
+// Live progress bar preview while typing
+$('#lists').addEventListener('input', e => {
+  const inp = e.target.closest('input[data-progress]');
+  if (!inp) return;
+  const bar = inp.closest('li').querySelector('progress');
+  if (bar) bar.value = clamp(+inp.value);
+});
+
+// Persist progress on commit
+$('#lists').addEventListener('change', async e => {
+  const inp = e.target.closest('input[data-progress]');
+  if (!inp) return;
+  const g = goals.find(x => x.id === +inp.dataset.progress);
+  if (!g) return;
+  g.progress = clamp(+inp.value);
+  if (g.progress === 100) g.done = true;   // auto-complete at 100%
+  await putGoal(g);
+  await load();
+});
+
+// Done / Restore / Delete
+$('#lists').addEventListener('click', async e => {
+  const doneBtn = e.target.closest('[data-done]');
+  const restoreBtn = e.target.closest('[data-restore]');
+  const delBtn = e.target.closest('[data-del]');
+
+  if (doneBtn) {
+    const g = goals.find(x => x.id === +doneBtn.dataset.done);
+    if (!g) return;
+    g.done = true;
+    g.progress = 100;
+    await putGoal(g);
+    await load();
+  } else if (restoreBtn) {
+    const g = goals.find(x => x.id === +restoreBtn.dataset.restore);
+    if (!g) return;
+    g.done = false;
+    await putGoal(g);
+    await load();
+  } else if (delBtn) {
+    await delGoal(+delBtn.dataset.del);
+    await load();
+  }
+});
+
+$('#themeBtn').addEventListener('click', () => {
+  applyTheme(document.documentElement.getAttribute('data-theme') === 'dark' ? 'light' : 'dark');
+});
+
+/* ---------------- Init ---------------- */
+(async function init() {
+  $('#deadline').value = todayStr();
+  applyTheme(document.documentElement.getAttribute('data-theme') || 'light');
+  await load();
+})();
+</script>
+</body>
+</html>
